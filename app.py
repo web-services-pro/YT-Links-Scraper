@@ -91,30 +91,6 @@ def setup_selenium_driver():
         print(f"Failed to setup Chrome WebDriver: {str(e)}")
         return None
 
-def find_links_in_json(data):
-    """
-    Recursively searches through a nested dictionary/list structure to find the 'links' array.
-    """
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if key == 'aboutChannelViewModel':
-                try:
-                    return value.get('links', [])
-                except KeyError:
-                    return []
-            
-            if isinstance(value, (dict, list)):
-                found = find_links_in_json(value)
-                if found is not None:
-                    return found
-    elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, (dict, list)):
-                found = find_links_in_json(item)
-                if found is not None:
-                    return found
-    return None
-
 def extract_clean_url(redirect_url):
     """
     Parses a YouTube redirect URL to extract and decode the actual destination URL
@@ -128,9 +104,248 @@ def extract_clean_url(redirect_url):
         print(f"Error parsing redirect URL: {e}")
     return None
 
-def get_links_from_channel_url_selenium(channel_url, driver, retry_count=0):
+def is_valid_external_url(url):
     """
-    Uses Selenium to fetch the 'About' page for a given YouTube channel URL and extract custom links.
+    Validate that the URL is external and not a YouTube internal link
+    """
+    if not url or not url.startswith('http'):
+        return False
+    
+    # Exclude YouTube internal URLs
+    exclude_domains = [
+        'youtube.com', 'youtu.be', 'googleapis.com', 'googleusercontent.com',
+        'gstatic.com', 'google.com', 'googlevideo.com'
+    ]
+    
+    try:
+        domain = urlparse(url).netloc.lower().replace('www.', '')
+        return not any(excluded in domain for excluded in exclude_domains)
+    except:
+        return False
+
+def find_links_in_json_enhanced(data, path=""):
+    """
+    Enhanced recursive search with multiple fallback patterns for different channel types
+    """
+    if isinstance(data, dict):
+        for key, value in data.items():
+            current_path = f"{path}.{key}" if path else key
+            
+            # Multiple patterns for different channel types
+            if key in ['aboutChannelViewModel', 'channelMetadataRenderer', 'c4TabbedHeaderRenderer']:
+                try:
+                    # Try different link storage patterns
+                    if 'links' in value:
+                        return value.get('links', [])
+                    elif 'headerLinks' in value:
+                        return value.get('headerLinks', [])
+                    elif 'customLinks' in value:
+                        return value.get('customLinks', [])
+                except (KeyError, TypeError):
+                    continue
+            
+            # Look for nested structures that might contain links
+            if key in ['contents', 'tabs', 'metadata', 'header'] and isinstance(value, (dict, list)):
+                found = find_links_in_json_enhanced(value, current_path)
+                if found:
+                    return found
+            
+            if isinstance(value, (dict, list)):
+                found = find_links_in_json_enhanced(value, current_path)
+                if found:
+                    return found
+                    
+    elif isinstance(data, list):
+        for i, item in enumerate(data):
+            if isinstance(item, (dict, list)):
+                found = find_links_in_json_enhanced(item, f"{path}[{i}]")
+                if found:
+                    return found
+    return None
+
+def parse_links_from_json(links_data):
+    """
+    Enhanced JSON link parsing with multiple fallback structures
+    """
+    extracted_links = []
+    
+    if not isinstance(links_data, list):
+        return extracted_links
+    
+    for link_item in links_data:
+        try:
+            # Pattern 1: channelExternalLinkViewModel (current)
+            if 'channelExternalLinkViewModel' in link_item:
+                link_info = link_item['channelExternalLinkViewModel']
+                title = link_info.get('title', {}).get('content', 'No Title')
+                redirect_url = (link_info.get('link', {})
+                              .get('commandRuns', [{}])[0]
+                              .get('onTap', {})
+                              .get('innertubeCommand', {})
+                              .get('urlEndpoint', {})
+                              .get('url'))
+            
+            # Pattern 2: Direct link structure
+            elif 'title' in link_item and 'url' in link_item:
+                title = link_item['title']
+                redirect_url = link_item['url']
+            
+            # Pattern 3: navigationEndpoint structure
+            elif 'navigationEndpoint' in link_item:
+                title = link_item.get('text', {}).get('simpleText', 'Link')
+                redirect_url = (link_item['navigationEndpoint']
+                              .get('urlEndpoint', {})
+                              .get('url'))
+            
+            # Pattern 4: Alternative nested structures
+            else:
+                # Try to find title and URL in any nested structure
+                title = None
+                redirect_url = None
+                
+                def find_text(obj):
+                    if isinstance(obj, dict):
+                        for key in ['content', 'simpleText', 'text', 'title']:
+                            if key in obj and isinstance(obj[key], str):
+                                return obj[key]
+                        for value in obj.values():
+                            result = find_text(value)
+                            if result:
+                                return result
+                    return None
+                
+                def find_url(obj):
+                    if isinstance(obj, dict):
+                        for key in ['url', 'href']:
+                            if key in obj and isinstance(obj[key], str):
+                                return obj[key]
+                        for value in obj.values():
+                            result = find_url(value)
+                            if result:
+                                return result
+                    return None
+                
+                title = find_text(link_item) or 'Link'
+                redirect_url = find_url(link_item)
+            
+            if redirect_url:
+                clean_url = extract_clean_url(redirect_url) if '/redirect?' in redirect_url else redirect_url
+                if clean_url and is_valid_external_url(clean_url):
+                    extracted_links.append({'title': title, 'url': clean_url})
+                    
+        except (KeyError, IndexError, TypeError) as e:
+            continue
+    
+    return extracted_links
+
+def extract_links_multiple_methods(driver, channel_url):
+    """
+    Try multiple methods to extract links with comprehensive fallbacks
+    """
+    html_content = driver.page_source
+    
+    # Method 1: Enhanced ytInitialData patterns
+    enhanced_patterns = [
+        r'var ytInitialData = (\{.*?\});</script>',
+        r'window\["ytInitialData"\] = (\{.*?\});',
+        r'ytInitialData\s*=\s*(\{.*?\});',
+        r'ytInitialData\[""\]\s*=\s*(\{.*?\});',
+        r'window\.ytInitialData\s*=\s*(\{.*?\});',
+        r'ytInitialData:\s*(\{.*?\}),',
+    ]
+    
+    for pattern in enhanced_patterns:
+        match = re.search(pattern, html_content, re.DOTALL)
+        if match:
+            try:
+                json_text = match.group(1)
+                data = json.loads(json_text)
+                links_data = find_links_in_json_enhanced(data)
+                if links_data:
+                    return parse_links_from_json(links_data), "Success (Enhanced JSON method)"
+            except json.JSONDecodeError:
+                continue
+    
+    # Method 2: Alternative JSON variable names
+    alt_patterns = [
+        r'window\[\"ytcfg\"\]\.d\(\)\.CLIENT_NAME = \"WEB\".*?ytInitialData["\']?\s*:\s*(\{.*?\})',
+        r'ytcfg\.set\s*\(\s*\{\s*[\'"]EXPERIMENT_FLAGS[\'"].*?ytInitialData[\'"]?\s*:\s*(\{.*?\})',
+    ]
+    
+    for pattern in alt_patterns:
+        match = re.search(pattern, html_content, re.DOTALL)
+        if match:
+            try:
+                json_text = match.group(1)
+                data = json.loads(json_text)
+                links_data = find_links_in_json_enhanced(data)
+                if links_data:
+                    return parse_links_from_json(links_data), "Success (Alternative JSON method)"
+            except json.JSONDecodeError:
+                continue
+    
+    # Method 3: Direct DOM element extraction with multiple selectors
+    link_selectors = [
+        'a[href*="/redirect?"]',
+        'a[href*="youtube.com/redirect"]',
+        '[data-target-new-window="true"]',
+        '.channel-external-link',
+        '.ytd-channel-external-link-view-model',
+        'yt-formatted-string a[href^="http"]'
+    ]
+    
+    for selector in link_selectors:
+        try:
+            link_elements = driver.find_elements(By.CSS_SELECTOR, selector)
+            if link_elements:
+                extracted_links = []
+                for element in link_elements[:10]:
+                    try:
+                        href = element.get_attribute('href')
+                        text = (element.text.strip() or 
+                               element.get_attribute('aria-label') or 
+                               element.get_attribute('title') or 'Link')
+                        
+                        if href:
+                            if '/redirect?' in href or 'youtube.com/redirect' in href:
+                                clean_url = extract_clean_url(href)
+                                if clean_url and is_valid_external_url(clean_url):
+                                    extracted_links.append({'title': text, 'url': clean_url})
+                            elif href.startswith('http') and 'youtube.com' not in href:
+                                extracted_links.append({'title': text, 'url': href})
+                    except Exception as e:
+                        continue
+                
+                if extracted_links:
+                    return extracted_links, f"Success (DOM method with {selector})"
+        except Exception as e:
+            continue
+    
+    # Method 4: Text-based regex extraction as last resort
+    try:
+        url_patterns = [
+            r'https?://(?:www\.)?(?:facebook|instagram|twitter|linkedin|tiktok)\.com/[\w\-\.]+',
+            r'https?://(?:www\.)?[\w\-]+\.(?:com|org|net|co|io)/[\w\-\.]*',
+        ]
+        
+        extracted_links = []
+        for pattern in url_patterns:
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            for url in matches[:5]:  # Limit to avoid false positives
+                if is_valid_external_url(url):
+                    extracted_links.append({'title': 'Extracted Link', 'url': url})
+        
+        if extracted_links:
+            return extracted_links, "Success (Regex extraction method)"
+            
+    except Exception as e:
+        pass
+    
+    return [], "No links found with any method"
+
+def get_links_from_channel_url_selenium_enhanced(channel_url, driver, retry_count=0):
+    """
+    Enhanced version with better error handling and multiple extraction methods
     """
     if not isinstance(channel_url, str) or not channel_url.startswith('http'):
         return [], f"Invalid channel URL: {channel_url}"
@@ -141,99 +356,48 @@ def get_links_from_channel_url_selenium(channel_url, driver, retry_count=0):
         # Navigate to the about page
         driver.get(about_url)
         
-        # Wait for page to load and check for common YouTube elements
+        # Enhanced wait strategy
         try:
-            # Wait for either the page content or an error message
-            WebDriverWait(driver, 10).until(  # Reduced timeout from 15 to 10
+            # Wait for page to load completely
+            WebDriverWait(driver, 15).until(
                 lambda d: d.execute_script("return document.readyState") == "complete"
             )
             
-            # Reduced additional wait time
-            time.sleep(1)  # Reduced from 3 to 1
+            # Wait for YouTube-specific elements
+            WebDriverWait(driver, 10).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.TAG_NAME, "ytd-channel-about-metadata-renderer")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "[data-target-new-window]")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/redirect?']")),
+                    EC.text_to_be_present_in_element((By.TAG_NAME, "body"), "about")
+                )
+            )
+            
+            # Additional wait for dynamic content
+            time.sleep(2)
             
         except TimeoutException:
-            return [], "Page load timeout"
+            return [], "Page load timeout - about page may not be available"
         
-        # Check if we're being rate limited or blocked
-        if "unusual traffic" in driver.page_source.lower():
-            if retry_count < 1:  # Reduced max retries from 2 to 1
-                wait_time = 60  # Fixed wait time of 60 seconds instead of increasing
-                print(f"Detected unusual traffic message. Waiting {wait_time} seconds...")
+        # Check for rate limiting
+        page_source_lower = driver.page_source.lower()
+        if any(phrase in page_source_lower for phrase in ["unusual traffic", "blocked", "captcha", "robot"]):
+            if retry_count < 1:
+                wait_time = 120  # 2 minutes
+                print(f"Detected blocking. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
-                return get_links_from_channel_url_selenium(channel_url, driver, retry_count + 1)
+                return get_links_from_channel_url_selenium_enhanced(channel_url, driver, retry_count + 1)
             else:
-                return [], "Blocked due to unusual traffic - max retries exceeded"
+                return [], "Blocked due to anti-bot measures - max retries exceeded"
         
-        # Get the page source after JavaScript execution
-        html_content = driver.page_source
-
-        # Find the ytInitialData JSON object
-        patterns = [
-            r'var ytInitialData = (\{.*?\});</script>',
-            r'window\["ytInitialData"\] = (\{.*?\});',
-            r'ytInitialData[""] = (\{.*?\});',
-            r'ytInitialData = (\{.*?\});'
-        ]
+        # Try multiple extraction methods
+        links, message = extract_links_multiple_methods(driver, channel_url)
         
-        data = None
-        for pattern in patterns:
-            match = re.search(pattern, html_content, re.DOTALL)
-            if match:
-                try:
-                    json_text = match.group(1)
-                    data = json.loads(json_text)
-                    break
-                except json.JSONDecodeError:
-                    continue
-        
-        if not data:
-            # Try alternative approach - look for links in the rendered page
-            try:
-                # Look for external link elements in the about section
-                link_elements = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/redirect?"]')
-                if link_elements:
-                    extracted_links = []
-                    for element in link_elements[:5]:  # Limit to first 5 links (reduced from 10)
-                        try:
-                            href = element.get_attribute('href')
-                            text = element.text.strip() or element.get_attribute('aria-label') or 'Link'
-                            if href and '/redirect?' in href:
-                                clean_url = extract_clean_url(href)
-                                if clean_url:
-                                    extracted_links.append({'title': text, 'url': clean_url})
-                        except:
-                            continue
-                    
-                    if extracted_links:
-                        return extracted_links, "Success (alternative method)"
-            except:
-                pass
+        if links:
+            return links, message
+        else:
+            return [], f"No links found - {message}"
             
-            return [], "Could not find ytInitialData or alternative link elements"
-
-        # Find the links array in the JSON data
-        links_data = find_links_in_json(data)
-        
-        if not links_data:
-            return [], "No custom links found in JSON data"
-
-        extracted_links = []
-        for link_item in links_data:
-            try:
-                link_info = link_item.get('channelExternalLinkViewModel', {})
-                title = link_info.get('title', {}).get('content', 'No Title')
-                redirect_url = link_info.get('link', {}).get('commandRuns', [{}])[0].get('onTap', {}).get('innertubeCommand', {}).get('urlEndpoint', {}).get('url')
-
-                if redirect_url:
-                    clean_url = extract_clean_url(redirect_url)
-                    if clean_url:
-                        extracted_links.append({'title': title, 'url': clean_url})
-
-            except (KeyError, IndexError) as e:
-                continue
-        
-        return extracted_links, "Success"
-
     except WebDriverException as e:
         return [], f"WebDriver error: {str(e)}"
     except Exception as e:
@@ -300,7 +464,8 @@ def process_dataframe_selenium(df, url_column_name, max_rows=None):
                     processed += 1
                     continue
                 
-                links, message = get_links_from_channel_url_selenium(str(channel_url), driver)
+                # Use the enhanced link extraction method
+                links, message = get_links_from_channel_url_selenium_enhanced(str(channel_url), driver)
                 
                 if links:
                     categorized_links, _ = categorize_links(links)
@@ -314,7 +479,7 @@ def process_dataframe_selenium(df, url_column_name, max_rows=None):
                         
                         df.at[index, col] = ', '.join(link_list)
                 else:
-                    if message != "No custom links found in JSON data":
+                    if message != "No links found - No links found with any method":
                         errors.append(f"Row {index + 1}: {message}")
                 
                 processed += 1
