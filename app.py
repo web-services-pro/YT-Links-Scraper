@@ -437,11 +437,14 @@ def process_dataframe_selenium(df, url_column_name, max_rows=None):
     else:
         processing_message = None
     
-    # Add new columns
+    # Add new columns - FIXED: Ensure all new columns are string type to avoid dtype warnings
     new_columns = ['Website'] + list(SOCIAL_MEDIA_KEYWORDS.keys()) + ['Other Links']
     for col in new_columns:
         if col not in df.columns:
-            df[col] = ''
+            df[col] = ''  # Initialize as empty string (object dtype)
+        else:
+            # Convert existing columns to string type if they exist
+            df[col] = df[col].astype(str)
     
     # Setup Selenium driver
     driver = setup_selenium_driver()
@@ -475,9 +478,11 @@ def process_dataframe_selenium(df, url_column_name, max_rows=None):
                         link_list = categorized_links.get(col, [])
                         if col == 'Other Links' and not df.at[index, 'Website']:
                             if link_list:
-                                df.at[index, 'Website'] = link_list.pop(0)
+                                # FIXED: Ensure we're storing strings
+                                df.at[index, 'Website'] = str(link_list.pop(0))
                         
-                        df.at[index, col] = ', '.join(link_list)
+                        # FIXED: Ensure we're storing strings
+                        df.at[index, col] = str(', '.join(link_list))
                 else:
                     if message != "No links found - No links found with any method":
                         errors.append(f"Row {index + 1}: {message}")
