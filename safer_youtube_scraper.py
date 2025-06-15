@@ -7,18 +7,13 @@ import time
 import random
 from urllib.parse import urljoin, urlparse
 import io
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.common.action_chains import ActionChains
 import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="YouTube Channel Data Enhancer - Safer Version",
+    page_title="YouTube Channel Data Enhancer - Streamlit Cloud Compatible",
     page_icon="🎬",
     layout="wide"
 )
@@ -38,106 +33,37 @@ def get_random_user_agent():
     ]
     return random.choice(user_agents)
 
-def setup_driver_with_stealth():
-    """Setup Chrome WebDriver with advanced stealth options"""
-    chrome_options = Options()
+def create_session():
+    """Create a requests session with retry strategy and stealth headers"""
+    session = requests.Session()
     
-    # Basic stealth options
-    chrome_options.add_argument("--headless=new")  # Use new headless mode
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-plugins")
-    chrome_options.add_argument("--disable-images")  # Faster loading
-    chrome_options.add_argument("--disable-javascript")  # Some pages work without JS
+    # Retry strategy
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     
-    # Anti-detection measures
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
+    # Default headers to mimic real browser
+    session.headers.update({
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
+    })
     
-    # Randomize window size
-    width = random.randint(1200, 1920)
-    height = random.randint(800, 1080)
-    chrome_options.add_argument(f"--window-size={width},{height}")
-    
-    # Random user agent
-    chrome_options.add_argument(f"--user-agent={get_random_user_agent()}")
-    
-    # Additional fingerprint randomization
-    chrome_options.add_argument("--disable-web-security")
-    chrome_options.add_argument("--allow-running-insecure-content")
-    chrome_options.add_argument("--disable-features=TranslateUI")
-    chrome_options.add_argument("--disable-ipc-flooding-protection")
-    
-    try:
-        driver = webdriver.Chrome(options=chrome_options)
-        
-        # Execute stealth scripts
-        stealth_js = """
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
-        });
-        
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-        });
-        
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en'],
-        });
-        
-        window.chrome = {
-            runtime: {},
-        };
-        
-        Object.defineProperty(navigator, 'permissions', {
-            get: () => ({
-                query: () => Promise.resolve({ state: 'granted' }),
-            }),
-        });
-        """
-        
-        driver.execute_script(stealth_js)
-        return driver
-        
-    except Exception as e:
-        st.error(f"Failed to setup Chrome WebDriver: {str(e)}")
-        st.info("Please ensure Chrome and ChromeDriver are installed.")
-        return None
-
-def human_like_delays():
-    """Generate human-like random delays"""
-    return random.uniform(2.5, 8.0)
-
-def simulate_human_behavior(driver):
-    """Simulate human-like behavior"""
-    try:
-        # Random mouse movements
-        action = ActionChains(driver)
-        
-        # Get window size
-        window_size = driver.get_window_size()
-        max_x = window_size['width']
-        max_y = window_size['height']
-        
-        # Random movements
-        for _ in range(random.randint(1, 3)):
-            x = random.randint(0, max_x)
-            y = random.randint(0, max_y)
-            action.move_by_offset(x, y)
-            time.sleep(random.uniform(0.1, 0.5))
-        
-        action.perform()
-        
-        # Random scroll
-        scroll_distance = random.randint(100, 500)
-        driver.execute_script(f"window.scrollBy(0, {scroll_distance});")
-        time.sleep(random.uniform(1, 2))
-        
-    except Exception as e:
-        logger.warning(f"Could not simulate human behavior: {e}")
+    return session
 
 def extract_social_links_safer(soup, page_url):
     """Extract social media links with better parsing"""
@@ -157,17 +83,21 @@ def extract_social_links_safer(soup, page_url):
         # Strategy 1: Look for link elements
         link_elements = soup.find_all(['a'], href=True)
         
-        # Strategy 2: Search in text content
+        # Strategy 2: Search in text content for URLs
         text_content = soup.get_text()
+        
+        # Strategy 3: Look in specific YouTube channel page elements
+        # YouTube often puts links in specific divs or spans
+        potential_link_containers = soup.find_all(['div', 'span', 'p'], class_=re.compile(r'(link|social|contact|about)', re.I))
         
         # More comprehensive URL patterns
         url_patterns = [
-            r'https?://(?:www\.)?instagram\.com/[^\s<>"\']+',
-            r'https?://(?:www\.)?(?:twitter|x)\.com/[^\s<>"\']+',
-            r'https?://(?:www\.)?tiktok\.com/[^\s<>"\']+',
-            r'https?://(?:www\.)?facebook\.com/[^\s<>"\']+',
-            r'https?://(?:www\.)?linkedin\.com/[^\s<>"\']+',
-            r'https?://[^\s<>"\']+\.[a-zA-Z]{2,}[^\s<>"\']*'
+            r'https?://(?:www\.)?instagram\.com/[^\s<>"\')\]]+',
+            r'https?://(?:www\.)?(?:twitter|x)\.com/[^\s<>"\')\]]+',
+            r'https?://(?:www\.)?tiktok\.com/[^\s<>"\')\]]+',
+            r'https?://(?:www\.)?facebook\.com/[^\s<>"\')\]]+',
+            r'https?://(?:www\.)?linkedin\.com/[^\s<>"\')\]]+',
+            r'https?://[^\s<>"\')\]]+\.[a-zA-Z]{2,}[^\s<>"\')\]]*'
         ]
         
         all_urls = set()
@@ -177,17 +107,45 @@ def extract_social_links_safer(soup, page_url):
             href = element.get('href', '')
             if href and href.startswith('http'):
                 all_urls.add(href)
+            elif href and href.startswith('/'):
+                # Handle relative URLs
+                try:
+                    full_url = urljoin(page_url, href)
+                    if full_url.startswith('http'):
+                        all_urls.add(full_url)
+                except:
+                    continue
         
         # Extract from text using patterns
+        all_text = text_content + ' '.join([elem.get_text() for elem in potential_link_containers])
         for pattern in url_patterns:
-            matches = re.findall(pattern, text_content, re.IGNORECASE)
+            matches = re.findall(pattern, all_text, re.IGNORECASE)
             all_urls.update(matches)
         
-        # Categorize URLs
+        # Look for URLs in data attributes and other attributes
+        for element in soup.find_all(attrs={'data-href': True}):
+            data_href = element.get('data-href', '')
+            if data_href and data_href.startswith('http'):
+                all_urls.add(data_href)
+        
+        # Clean and categorize URLs
         for url in all_urls:
             try:
+                # Clean URL
+                url = url.strip().rstrip('.,;)')
+                if not url.startswith('http'):
+                    continue
+                    
                 domain = urlparse(url).netloc.lower()
                 
+                # Skip YouTube URLs and common false positives
+                if any(skip in domain for skip in [
+                    'youtube.com', 'youtu.be', 'google.com', 'googleusercontent.com',
+                    'ggpht.com', 'ytimg.com'
+                ]):
+                    continue
+                
+                # Categorize by platform
                 if 'instagram.com' in domain and not links['Instagram']:
                     links['Instagram'] = url
                 elif ('twitter.com' in domain or 'x.com' in domain) and not links['Twitter']:
@@ -198,12 +156,12 @@ def extract_social_links_safer(soup, page_url):
                     links['Facebook'] = url
                 elif 'linkedin.com' in domain and not links['LinkedIn']:
                     links['LinkedIn'] = url
-                elif not any(platform in domain for platform in [
-                    'youtube.com', 'youtu.be', 'google.com', 'googleusercontent.com',
-                    'instagram.com', 'twitter.com', 'x.com', 'tiktok.com', 
-                    'facebook.com', 'fb.com', 'linkedin.com'
-                ]):
-                    if not links['Website'] and '.' in domain and len(domain) > 4:
+                elif '.' in domain and len(domain) > 4:
+                    # Potential website
+                    if not links['Website'] and not any(platform in domain for platform in [
+                        'instagram.com', 'twitter.com', 'x.com', 'tiktok.com', 
+                        'facebook.com', 'fb.com', 'linkedin.com'
+                    ]):
                         links['Website'] = url
                     else:
                         links['Other_Links'].append(url)
@@ -212,8 +170,8 @@ def extract_social_links_safer(soup, page_url):
                 logger.warning(f"Error parsing URL {url}: {e}")
                 continue
         
-        # Convert Other_Links to string
-        links['Other_Links'] = ', '.join(links['Other_Links'][:3]) if links['Other_Links'] else None  # Limit to 3
+        # Convert Other_Links to string and limit
+        links['Other_Links'] = ', '.join(links['Other_Links'][:3]) if links['Other_Links'] else None
         
         return links
         
@@ -221,66 +179,69 @@ def extract_social_links_safer(soup, page_url):
         logger.error(f"Error extracting social links: {e}")
         return {key: None for key in links.keys()}
 
-def scrape_with_fallback(channel_url, driver, max_retries=2):
+def scrape_with_fallback(channel_url, session, max_retries=2):
     """Scrape with fallback strategies and retry logic"""
     
     for attempt in range(max_retries + 1):
         try:
-            # Normalize URL
-            about_url = channel_url.rstrip('/') + '/about'
+            # Normalize URL - try both /about and /channels/[ID]/about
+            base_url = channel_url.rstrip('/')
+            about_urls = [
+                f"{base_url}/about",
+                f"{base_url}/channels/about" if '/channel/' in base_url else f"{base_url}/about"
+            ]
             
-            logger.info(f"Attempt {attempt + 1}: Scraping {about_url}")
-            
-            # Random delay before request
-            time.sleep(human_like_delays())
-            
-            driver.get(about_url)
-            
-            # Wait for page load
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-            
-            # Simulate human behavior
-            simulate_human_behavior(driver)
-            
-            # Additional wait for dynamic content
-            time.sleep(random.uniform(3, 6))
-            
-            # Check if we got blocked (common indicators)
-            page_source = driver.page_source.lower()
-            if any(indicator in page_source for indicator in [
-                'captcha', 'blocked', 'unusual traffic', 'robot', 'automated'
-            ]):
-                logger.warning(f"Possible blocking detected on attempt {attempt + 1}")
-                if attempt < max_retries:
-                    time.sleep(random.uniform(30, 60))  # Long delay before retry
+            for about_url in about_urls:
+                logger.info(f"Attempt {attempt + 1}: Scraping {about_url}")
+                
+                # Random delay before request
+                time.sleep(random.uniform(2, 6))
+                
+                # Update user agent for this request
+                session.headers.update({'User-Agent': get_random_user_agent()})
+                
+                try:
+                    response = session.get(about_url, timeout=15)
+                    response.raise_for_status()
+                    
+                    # Check if we got a valid YouTube page
+                    if 'youtube' not in response.url.lower():
+                        logger.warning(f"Redirected away from YouTube: {response.url}")
+                        continue
+                    
+                    # Check for blocking indicators
+                    page_content = response.text.lower()
+                    if any(indicator in page_content for indicator in [
+                        'captcha', 'blocked', 'unusual traffic', 'robot', 'automated'
+                    ]):
+                        logger.warning(f"Possible blocking detected on attempt {attempt + 1}")
+                        if attempt < max_retries:
+                            time.sleep(random.uniform(30, 60))
+                            break  # Try next attempt
+                        else:
+                            return {key: None for key in ['Website', 'Instagram', 'Twitter', 'TikTok', 'Facebook', 'LinkedIn', 'Other_Links']}
+                    
+                    # Parse the page
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    social_links = extract_social_links_safer(soup, about_url)
+                    
+                    # If we found something, return it
+                    if any(social_links.values()):
+                        logger.info(f"Successfully extracted links on attempt {attempt + 1}")
+                        return social_links
+                    
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"Request failed for {about_url}: {e}")
                     continue
-                else:
-                    return {key: None for key in ['Website', 'Instagram', 'Twitter', 'TikTok', 'Facebook', 'LinkedIn', 'Other_Links']}
             
-            # Parse the page
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            social_links = extract_social_links_safer(soup, about_url)
-            
-            # If we found something, return it
-            if any(social_links.values()):
-                logger.info(f"Successfully extracted links on attempt {attempt + 1}")
-                return social_links
-            
-            # If no links found and we have retries left, try again
+            # If no URLs worked and we have retries left, try again
             if attempt < max_retries:
                 logger.info(f"No links found on attempt {attempt + 1}, retrying...")
                 time.sleep(random.uniform(10, 20))
                 continue
             
-            return social_links
+            return {key: None for key in ['Website', 'Instagram', 'Twitter', 'TikTok', 'Facebook', 'LinkedIn', 'Other_Links']}
             
-        except TimeoutException:
-            logger.warning(f"Timeout on attempt {attempt + 1} for {channel_url}")
-            if attempt < max_retries:
-                time.sleep(random.uniform(15, 30))
-                continue
         except Exception as e:
             logger.error(f"Error on attempt {attempt + 1} for {channel_url}: {str(e)}")
             if attempt < max_retries:
@@ -291,10 +252,8 @@ def scrape_with_fallback(channel_url, driver, max_retries=2):
     return {key: None for key in ['Website', 'Instagram', 'Twitter', 'TikTok', 'Facebook', 'LinkedIn', 'Other_Links']}
 
 def process_dataframe_safer(df, url_column, delay_range=(10, 30), batch_size=5):
-    """Process dataframe with advanced safety measures"""
-    driver = setup_driver_with_stealth()
-    if not driver:
-        return None
+    """Process dataframe with advanced safety measures using requests"""
+    session = create_session()
     
     try:
         # Add new columns
@@ -324,7 +283,7 @@ def process_dataframe_safer(df, url_column, delay_range=(10, 30), batch_size=5):
             status_text.text(f"Processing {idx + 1}/{total_rows}: {str(channel_url)[:50]}...")
             
             # Scrape with retries and fallbacks
-            social_links = scrape_with_fallback(channel_url, driver)
+            social_links = scrape_with_fallback(channel_url, session)
             
             # Update dataframe
             links_found = 0
@@ -339,13 +298,7 @@ def process_dataframe_safer(df, url_column, delay_range=(10, 30), batch_size=5):
                 success_count += 1
                 df.at[idx, 'Processing_Status'] = f'Success ({links_found} links found)'
             else:
-                # Check if we might have been blocked
-                page_source = driver.page_source.lower() if driver.page_source else ""
-                if any(indicator in page_source for indicator in ['captcha', 'blocked', 'unusual traffic']):
-                    blocked_count += 1
-                    df.at[idx, 'Processing_Status'] = 'Possibly blocked'
-                else:
-                    df.at[idx, 'Processing_Status'] = 'No links found'
+                df.at[idx, 'Processing_Status'] = 'No links found'
             
             processed_count += 1
             progress_bar.progress(processed_count / total_rows)
@@ -369,7 +322,7 @@ def process_dataframe_safer(df, url_column, delay_range=(10, 30), batch_size=5):
             else:
                 delay_multiplier = 1
             
-            # Longer delays between requests
+            # Delays between requests
             if processed_count % batch_size == 0:
                 delay = random.uniform(delay_range[0] * 2 * delay_multiplier, delay_range[1] * 2 * delay_multiplier)
                 status_text.text(f"Taking a longer break... ({delay:.1f}s)")
@@ -392,16 +345,15 @@ def process_dataframe_safer(df, url_column, delay_range=(10, 30), batch_size=5):
         st.error(f"Error during processing: {str(e)}")
         return df
     finally:
-        if driver:
-            driver.quit()
+        session.close()
 
 def main():
-    st.title("🎬 YouTube Channel Data Enhancer - Safer Version")
+    st.title("🎬 YouTube Channel Data Enhancer - Streamlit Cloud Compatible")
     st.markdown("""
-    **⚠️ Important Notice:** This tool uses web scraping which may violate YouTube's Terms of Service. 
-    Use responsibly and consider rate limits. For commercial use, consider professional scraping services.
+    **✅ Now compatible with Streamlit Cloud!** This version uses requests instead of Selenium.
     
     **Features:**
+    - No browser dependencies - works on Streamlit Cloud
     - Advanced anti-detection measures
     - Human-like behavior simulation  
     - Retry logic with exponential backoff
@@ -409,23 +361,20 @@ def main():
     """)
     
     # Risk warning
-    with st.expander("⚠️ Risk Disclosure - Please Read"):
-        st.warning("""
-        **Potential Risks:**
-        - YouTube may detect and block automated access
-        - Your IP address could be temporarily or permanently blocked
-        - CAPTCHA challenges may interrupt the process
-        - Success rates may vary and decrease over time
+    with st.expander("⚠️ Usage Guidelines - Please Read"):
+        st.info("""
+        **Best Practices:**
+        - Use reasonable delays between requests (10-30 seconds recommended)
+        - Process small batches (20-50 channels at a time)
+        - Respect rate limits and be considerate of server resources
+        - Consider the ethical implications of web scraping
         
-        **Recommendations:**
-        - Use sparingly and respectfully
-        - Consider professional scraping services for large-scale needs
-        - Always respect robots.txt and terms of service
-        - Consider using YouTube Data API where possible
+        **Note:** This tool extracts publicly available information from YouTube channel about pages.
+        Success rates may vary based on YouTube's current page structure and anti-bot measures.
         """)
     
     # Configuration
-    st.subheader("⚙️ Safety Configuration")
+    st.subheader("⚙️ Configuration")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -436,12 +385,12 @@ def main():
         max_delay = st.slider("Maximum delay between requests (seconds)", 15, 60, 25)
         max_channels = st.number_input("Max channels to process (0 = all)", 0, 100, 0)
     
-    # Tips for small batches
-    st.info("💡 **Tips for <100 channels:**\n"
-           "• Use 12-25 second delays for best results\n"
-           "• Process during off-peak hours (early morning/late evening)\n" 
-           "• Stop and resume if you encounter blocks\n"
-           "• Consider splitting into batches of 20-30 channels")
+    # Tips for better results
+    st.success("💡 **Streamlit Cloud Optimized:**\n"
+               "• No browser installation needed\n"
+               "• Faster and more reliable than Selenium\n" 
+               "• Better resource efficiency\n"
+               "• Improved stealth capabilities")
     
     # File upload
     uploaded_file = st.file_uploader(
@@ -481,7 +430,7 @@ def main():
             st.info(f"📊 **Processing Estimate:**\n"
                    f"• {len(youtube_urls)} YouTube URLs found\n"
                    f"• Estimated time: {estimated_time:.1f} minutes\n"
-                   f"• Recommended for batches under 100 channels")
+                   f"• Compatible with Streamlit Cloud")
             
             # Show sample URLs
             if len(youtube_urls) > 0:
@@ -491,15 +440,15 @@ def main():
                     if len(youtube_urls) > 5:
                         st.write(f"... and {len(youtube_urls) - 5} more")
             
-            # Processing with better UX
-            if st.button("🚀 Start Safe Processing", type="primary"):
+            # Processing
+            if st.button("🚀 Start Processing (Streamlit Cloud Ready)", type="primary"):
                 if st.session_state.get('processing', False):
                     st.warning("Already processing...")
                 else:
                     st.session_state.processing = True
                     
                     try:
-                        st.info("🤖 Starting browser and applying stealth measures...")
+                        st.info("🌐 Starting HTTP requests with stealth headers...")
                         
                         enhanced_df = process_dataframe_safer(
                             df.copy(), 
@@ -587,7 +536,7 @@ def main():
                                 help="Download your enhanced dataset with social media links"
                             )
                             
-                            # Success tips
+                            # Success feedback
                             success_rate = len([s for s in enhanced_df.get('Processing_Status', []) if 'Success' in str(s)]) / len(enhanced_df) * 100
                             if success_rate < 50:
                                 st.warning(f"📊 Success rate was {success_rate:.1f}%. Consider:\n"
@@ -595,7 +544,7 @@ def main():
                                           "• Processing during different hours\n"
                                           "• Splitting into smaller batches")
                             else:
-                                st.success(f"🎉 Great success rate: {success_rate:.1f}%!")
+                                st.success(f"🎉 Great success rate: {success_rate:.1f}%! 🎉")
                     
                     finally:
                         st.session_state.processing = False
